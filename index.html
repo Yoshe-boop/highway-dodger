@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Highway Dodger</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#87ceeb;touch-action:none;
+    -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;
+    font-family:-apple-system,Segoe UI,Roboto,sans-serif}
+  canvas{display:block}
+  #score{position:fixed;top:0;left:0;right:0;text-align:center;color:#fff;font-size:34px;
+    font-weight:800;padding-top:calc(env(safe-area-inset-top,0px) + 12px);
+    text-shadow:0 2px 6px rgba(0,0,0,.55);pointer-events:none}
+  #hint{position:fixed;bottom:calc(env(safe-area-inset-bottom,0px) + 24px);left:0;right:0;
+    text-align:center;color:#fff;font-size:15px;opacity:.85;pointer-events:none;
+    text-shadow:0 1px 4px rgba(0,0,0,.6);transition:opacity .6s}
+  #over{position:fixed;inset:0;display:none;flex-direction:column;align-items:center;
+    justify-content:center;background:rgba(10,10,20,.72);color:#fff;text-align:center}
+  #over h1{margin:0 0 8px;font-size:40px;color:#ff5252}
+  #over p{margin:4px 0;font-size:20px}
+  #over button{margin-top:22px;padding:16px 40px;font-size:22px;font-weight:700;color:#fff;
+    background:#2e9bff;border:0;border-radius:14px;box-shadow:0 4px 0 #1b6fc0}
+  #over button:active{transform:translateY(3px);box-shadow:0 1px 0 #1b6fc0}
+</style>
+</head>
+<body>
+<div id="score">0</div>
+<div id="hint">Tap left / right side of the screen to change lanes</div>
+<div id="over">
+  <h1>CRASH!</h1>
+  <p>Score: <b id="final">0</b></p>
+  <p>Best: <b id="best">0</b></p>
+  <button id="again">Play Again</button>
+</div>
+
+<script>
+(function () {
+  const LANES = [-3, 0, 3];
+  const scoreEl = document.getElementById('score');
+  const overEl = document.getElementById('over');
+  const hintEl = document.getElementById('hint');
+
+  // ---------- Renderer / scene ----------
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  document.body.appendChild(renderer.domElement);
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x87ceeb);
+  scene.fog = new THREE.Fog(0x87ceeb, 45, 140);
+
+  const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 200);
+
+  scene.add(new THREE.AmbientLight(0xffffff, 0.75));
+  const sun = new THREE.DirectionalLight(0xffffff, 0.6);
+  sun.position.set(5, 12, 6);
+  scene.add(sun);
+
+  function resize() {
+    const w = window.innerWidth, h = window.innerHeight, aspect = w / h;
+    renderer.setSize(w, h);
+    camera.aspect = aspect;
+    // pull camera back on narrow (portrait) screens so all 3 lanes fit
+    const halfV = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+    const dist = Math.min(Math.max(6.5 / (halfV * aspect), 11), 28);
+    camera.position.set(0, dist * 0.45, dist);
+    camera.lookAt(0, 0, -10);
+    camera.updateProjectionMatrix();
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // ---------- Helpers ----------
+  const box = (w, h, d, color, x = 0, y = 0, z = 0) => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d),
+      new THREE.MeshLambertMaterial({ color }));
+    m.position.set(x, y, z);
+    return m;
+  };
+
+  function makeCar(color, isPlayer) {
+    const g = new THREE.Group();
+    g.add(box(1.8, 0.6, 3.6, color, 0, 0.55, 0));
+    g.add(box(1.4, 0.5, 1.8, isPlayer ? 0xffffff : 0x223344, 0, 1.08, 0.2));
+    [[-0.95, -1.2], [0.95, -1.2], [-0.95, 1.2], [0.95, 1.2]].forEach(p =>
+      g.add(box(0.3, 0.6, 0.7, 0x111111, p[0], 0.3, p[1])));
+    const light = isPlayer ? 0xff2222 : 0xffee88;
+    const lz = isPlayer ? 1.81 : -1.81;
+    g.add(box(0.4, 0.2, 0.05, light, -0.55, 0.6, lz));
+    g.add(box(0.4, 0.2, 0.05, light, 0.55, 0.6, lz));
+    return g;
+  }
+
+  // ---------- World ----------
+  const ground = box(300, 0.1, 400, 0x3f9b4b, 0, -0.1, -140);
+  scene.add(ground);
+  scene.add(box(10, 0.1, 400, 0x333338, 0, -0.04, -140));           // road
+  scene.add(box(0.25, 0.12, 400, 0xffffff, -4.7, 0, -140));         // edge lines
+  scene.add(box(0.25, 0.12, 400, 0xffffff, 4.7, 0, -140));
+
+  const DASH_SP = 8, DASH_N = 24, dashes = [];
+  [-1.5, 1.5].forEach(x => {
+    for (let i = 0; i < DASH_N; i++) {
+      const d = box(0.2, 0.06, 3, 0xffffff, x, 0.02, -i * DASH_SP + 10);
+      scene.add(d); dashes.push(d);
+    }
+  });
+
+  const scenery = [], SC_N = 14, SC_SP = 14;
+  for (let i = 0; i < SC_N; i++) {
+    [-1, 1].forEach(side => {
+      const t = new THREE.Group();
+      t.add(box(0.6, 1.6, 0.6, 0x6b4423, 0, 0.8, 0));
+      t.add(box(2.2, 2.2, 2.2, 0x2f7d32, 0, 2.7, 0));
+      t.position.set(side * (7.5 + Math.random() * 5), 0, -i * SC_SP + 10 - Math.random() * 6);
+      scene.add(t); scenery.push(t);
+    });
+  }
+
+  const player = makeCar(0x2e9bff, true);
+  scene.add(player);
+
+  // ---------- State ----------
+  let obstacles = [], lane = 1, speed = 24, score = 0, alive = false, spawnT = 0;
+  let best = 0;
+  try { best = parseInt(localStorage.getItem('hwBest') || '0', 10) || 0; } catch (e) {}
+  const COLORS = [0xe53935, 0xfdd835, 0x8e24aa, 0xff7043, 0x43a047, 0xeceff1];
+
+  function reset() {
+    obstacles.forEach(o => scene.remove(o));
+    obstacles = [];
+    lane = 1; speed = 24; score = 0; spawnT = 0.5; alive = true;
+    player.position.set(LANES[1], 0, 0);
+    player.rotation.y = 0;
+    overEl.style.display = 'none';
+    scoreEl.textContent = '0';
+    hintEl.style.opacity = 1;
+    setTimeout(() => { hintEl.style.opacity = 0; }, 3500);
+  }
+
+  function spawnRow() {
+    const a = Math.floor(Math.random() * 3);
+    const lanes = [a];
+    if (Math.random() < 0.35) lanes.push((a + 1 + Math.floor(Math.random() * 2)) % 3); // never all 3
+    lanes.forEach(l => {
+      const c = makeCar(COLORS[Math.floor(Math.random() * COLORS.length)], false);
+      c.position.set(LANES[l], 0, -130);
+      scene.add(c); obstacles.push(c);
+    });
+  }
+
+  function gameOver() {
+    alive = false;
+    const s = Math.floor(score);
+    if (s > best) {
+      best = s;
+      try { localStorage.setItem('hwBest', String(best)); } catch (e) {}
+    }
+    document.getElementById('final').textContent = s;
+    document.getElementById('best').textContent = best;
+    overEl.style.display = 'flex';
+  }
+
+  // ---------- Input ----------
+  function steer(dir) {
+    if (!alive) return;
+    lane = Math.max(0, Math.min(2, lane + dir));
+  }
+  window.addEventListener('pointerdown', e => {
+    if (e.target.closest('#over')) return;
+    e.preventDefault();
+    steer(e.clientX < window.innerWidth / 2 ? -1 : 1);
+  }, { passive: false });
+  window.addEventListener('keydown', e => {
+    if (e.key === 'ArrowLeft') steer(-1);
+    if (e.key === 'ArrowRight') steer(1);
+  });
+  document.getElementById('again').addEventListener('click', reset);
+  document.addEventListener('touchmove', e => e.preventDefault(), { passive: false });
+
+  // ---------- Loop ----------
+  let last = performance.now();
+  function loop(now) {
+    requestAnimationFrame(loop);
+    const dt = Math.min((now - last) / 1000, 0.05);
+    last = now;
+
+    if (alive) {
+      speed = Math.min(speed + dt * 0.5, 62);
+      score += dt * speed * 0.4;
+      scoreEl.textContent = Math.floor(score);
+
+      // smooth lane change + slight tilt
+      const tx = LANES[lane];
+      const dx = tx - player.position.x;
+      player.position.x += dx * Math.min(1, dt * 12);
+      player.rotation.y = -dx * 0.12;
+
+      // spawn
+      spawnT -= dt;
+      if (spawnT <= 0) {
+        spawnRow();
+        spawnT = (20 + Math.random() * 14) / speed;
+      }
+
+      // move obstacles + collide
+      for (let i = obstacles.length - 1; i >= 0; i--) {
+        const o = obstacles[i];
+        o.position.z += speed * dt;
+        if (o.position.z > 14) { scene.remove(o); obstacles.splice(i, 1); continue; }
+        if (Math.abs(o.position.z) < 3.4 && Math.abs(o.position.x - player.position.x) < 1.7) {
+          gameOver();
+          break;
+        }
+      }
+    }
+
+    // scroll road & scenery (keeps moving softly on game over)
+    const v = alive ? speed : 0;
+    dashes.forEach(d => {
+      d.position.z += v * dt;
+      if (d.position.z > 12) d.position.z -= DASH_N * DASH_SP;
+    });
+    scenery.forEach(t => {
+      t.position.z += v * dt;
+      if (t.position.z > 14) t.position.z -= SC_N * SC_SP;
+    });
+
+    renderer.render(scene, camera);
+  }
+
+  reset();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
